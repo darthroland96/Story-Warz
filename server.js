@@ -3,12 +3,14 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
-// The Server's Memory
+// The Server's Memory (Now with Scores and Round Tracking)
 let gameData = {
     players: [],
     stories: [],
     currentStory: null,
-    votes: []
+    votes: [],
+    scores: {},
+    roundCount: 0
 };
 
 // 1. Deliver the Player Screen
@@ -79,7 +81,6 @@ app.get('/', (req, res) => {
                 document.getElementById('waiting-section').style.display = 'block';
             }
 
-            // When the TV shows a story, turn the phone into a voting pad
             socket.on('display_new_story', function(data) {
                 document.getElementById('waiting-section').style.display = 'none';
                 document.getElementById('voting-section').style.display = 'block';
@@ -98,7 +99,6 @@ app.get('/', (req, res) => {
                 document.getElementById('wait-text').innerText = "Vote locked in!";
             }
 
-            // If the host hits reset, reload the page
             socket.on('game_reset', () => { window.location.reload(); });
         </script>
     </body>
@@ -114,17 +114,22 @@ app.get('/tv', (req, res) => {
     <head>
         <title>Story Warz - TV</title>
         <style>
-            body { background: #1a1a1a; color: white; font-family: sans-serif; text-align: center; padding: 50px; }
-            h1 { color: #ff4444; font-size: 50px; margin-bottom: 10px; }
+            body { background: #1a1a1a; color: white; font-family: sans-serif; text-align: center; padding: 30px; }
+            h1 { color: #ff4444; font-size: 50px; margin-bottom: 5px; }
+            #round-indicator { color: #ffaa00; font-size: 24px; font-weight: bold; margin-bottom: 20px; }
             #lobby { font-size: 24px; background: #2a2a2a; padding: 20px; border-radius: 10px; display: inline-block; min-width: 300px; }
             .player-row { margin: 10px 0; }
-            #story-board { display: none; font-size: 32px; background: #333; padding: 40px; border-radius: 15px; margin-top: 30px; line-height: 1.5; }
-            #live-feed { margin-top: 30px; font-size: 24px; color: #ffaa00; text-align: left; display: inline-block; }
-            .vote-entry { margin: 10px 0; background: #222; padding: 10px 20px; border-radius: 8px; border-left: 5px solid #ffaa00; }
+            #story-board { display: none; font-size: 32px; background: #333; padding: 40px; border-radius: 15px; line-height: 1.5; }
+            #live-feed { margin-top: 20px; font-size: 24px; color: #ffaa00; text-align: left; display: inline-block; width: 45%; vertical-align: top; }
+            #leaderboard { margin-top: 20px; font-size: 24px; text-align: left; display: none; width: 45%; vertical-align: top; background: #111; padding: 20px; border-radius: 10px; border: 2px solid #ff4444;}
+            .vote-entry { margin: 10px 0; background: #222; padding: 10px; border-radius: 8px; border-left: 5px solid #ffaa00; }
+            .reveal-author { font-size: 40px; color: #44ff44; font-weight: bold; margin-top: 30px; text-transform: uppercase; animation: flash 1s ease-in-out; }
+            @keyframes flash { 0% { opacity: 0; } 100% { opacity: 1; } }
         </style>
     </head>
     <body>
         <h1>STORY WARZ</h1>
+        <div id="round-indicator"></div>
         
         <div id="lobby-container">
             <h2>Players In Lobby:</h2>
@@ -132,7 +137,11 @@ app.get('/tv', (req, res) => {
         </div>
 
         <div id="story-board"></div>
-        <div id="live-feed"></div>
+        
+        <div id="bottom-container">
+            <div id="live-feed"></div>
+            <div id="leaderboard"></div>
+        </div>
 
         <script src="/socket.io/socket.io.js"></script>
         <script>
@@ -153,15 +162,37 @@ app.get('/tv', (req, res) => {
 
             socket.on('display_new_story', function(data) {
                 document.getElementById('lobby-container').style.display = 'none';
-                document.getElementById('live-feed').innerHTML = "<h3>Live Guesses:</h3>"; // Clear old votes
+                document.getElementById('leaderboard').style.display = 'none';
+                
+                let roundText = "ROUND " + data.round + " OF 8";
+                if(data.isDoublePoints) { roundText += " (DOUBLE POINTS!)"; }
+                document.getElementById('round-indicator').innerText = roundText;
+
+                document.getElementById('live-feed').innerHTML = "<h3>Live Guesses:</h3>"; 
                 const board = document.getElementById('story-board');
                 board.style.display = 'block';
                 board.innerHTML = "<strong>Anonymous Story:</strong><br><br>" + data.text;
             });
 
-            // Show votes live as they happen
             socket.on('show_vote_live', function(data) {
                 document.getElementById('live-feed').innerHTML += "<div class='vote-entry'><strong>" + data.voter + "</strong> locked in... Guessing: <strong>" + data.guess + "</strong></div>";
+            });
+
+            socket.on('show_reveal', function(data) {
+                const board = document.getElementById('story-board');
+                board.innerHTML += "<div class='reveal-author'>AUTHOR: " + data.author + "!</div>";
+                
+                // Show Leaderboard
+                const lb = document.getElementById('leaderboard');
+                lb.style.display = 'inline-block';
+                let lbHTML = "<h3>LEADERBOARD</h3>";
+                
+                // Sort scores highest to lowest
+                let sortedPlayers = Object.keys(data.scores).sort((a, b) => data.scores[b] - data.scores[a]);
+                sortedPlayers.forEach(p => {
+                    lbHTML += "<div><strong>" + p + "</strong>: " + data.scores[p] + " pts</div><hr>";
+                });
+                lb.innerHTML = lbHTML;
             });
 
             socket.on('game_reset', () => { window.location.reload(); });
@@ -183,15 +214,18 @@ app.get('/host', (req, res) => {
             body { background: #000; color: #ffaa00; font-family: sans-serif; text-align: center; padding: 20px; }
             button { width: 90%; padding: 20px; margin: 15px 0; font-size: 18px; font-weight: bold; border-radius: 10px; cursor: pointer; border: none; }
             .btn-pull { background: #ffaa00; color: black; }
+            .btn-reveal { background: #44ff44; color: black; }
             .btn-reset { background: #ff4444; color: white; margin-top: 50px; }
             #stats { margin-bottom: 20px; font-size: 20px; }
         </style>
     </head>
     <body>
         <h1>HOST REMOTE</h1>
-        <div id="stats">Stories in Bank: <span id="storyCount">0</span></div>
+        <div id="stats">Stories in Bank: <span id="storyCount">0</span> | Round: <span id="roundCount">0</span>/8</div>
         
-        <button class="btn-pull" onclick="triggerNextStory()">PULL RANDOM STORY</button>
+        <button class="btn-pull" onclick="triggerNextStory()">1. PULL RANDOM STORY</button>
+        <button class="btn-reveal" onclick="revealStory()">2. REVEAL AUTHOR & SCORES</button>
+        
         <button class="btn-reset" onclick="resetGame()">🚨 RESET GAME (CLEAR ALL)</button>
 
         <script src="/socket.io/socket.io.js"></script>
@@ -200,11 +234,11 @@ app.get('/host', (req, res) => {
             
             socket.on('update_host_stats', function(data) {
                 document.getElementById('storyCount').innerText = data.totalStories;
+                document.getElementById('roundCount').innerText = data.roundCount;
             });
 
-            function triggerNextStory() {
-                socket.emit('host_next_story');
-            }
+            function triggerNextStory() { socket.emit('host_next_story'); }
+            function revealStory() { socket.emit('host_reveal_author'); }
 
             function resetGame() {
                 if(confirm("Are you sure? This will delete all players and stories!")) {
@@ -220,12 +254,12 @@ app.get('/host', (req, res) => {
 // 4. The Real-Time Brain
 io.on('connection', (socket) => {
   
-  // Send current players to new connections just in case
   gameData.players.forEach(p => socket.emit('update_lobby', { name: p }));
 
   socket.on('player_join', (data) => {
     if (!gameData.players.includes(data.name)) {
         gameData.players.push(data.name);
+        gameData.scores[data.name] = 0; // Initialize score to zero
     }
     io.emit('update_lobby', { name: data.name });
   });
@@ -237,10 +271,12 @@ io.on('connection', (socket) => {
         }
     });
     io.emit('player_submitted', { name: data.name });
-    io.emit('update_host_stats', { totalStories: gameData.stories.length });
+    io.emit('update_host_stats', { totalStories: gameData.stories.length, roundCount: gameData.roundCount });
   });
 
   socket.on('host_next_story', () => {
+    if (gameData.roundCount >= 8) return; // Cap at 8 rounds
+
     let unreadStories = gameData.stories.filter(s => s.read === false);
     if (unreadStories.length > 0) {
         let randomIndex = Math.floor(Math.random() * unreadStories.length);
@@ -248,28 +284,57 @@ io.on('connection', (socket) => {
         
         selectedStory.read = true;
         gameData.currentStory = selectedStory;
-        gameData.votes = []; // Clear votes for the new round
+        gameData.votes = []; 
+        gameData.roundCount++;
         
-        // Send text to TV, and send Player List to phones for the voting buttons
-        io.emit('display_new_story', { text: selectedStory.text, players: gameData.players });
+        let doublePointsActive = gameData.roundCount >= 5;
+
+        io.emit('display_new_story', { 
+            text: selectedStory.text, 
+            players: gameData.players,
+            round: gameData.roundCount,
+            isDoublePoints: doublePointsActive
+        });
+        
+        io.emit('update_host_stats', { totalStories: gameData.stories.length, roundCount: gameData.roundCount });
     }
   });
 
-  // Handle live votes
   socket.on('cast_vote', (data) => {
-      // Gatekeeper: Make sure they haven't voted yet this round
       if(!gameData.votes.find(v => v.voter === data.voter)) {
           gameData.votes.push(data);
-          // Instantly flash it on the TV
           io.emit('show_vote_live', data);
       }
   });
 
-  // The Kill Switch
+  socket.on('host_reveal_author', () => {
+      if (!gameData.currentStory) return;
+
+      let trueAuthor = gameData.currentStory.author;
+      let multiplier = (gameData.roundCount >= 5) ? 2 : 1; 
+
+      // Calculate the Math
+      gameData.votes.forEach(vote => {
+          if (vote.guess === trueAuthor) {
+              gameData.scores[vote.voter] += (2 * multiplier); // +2 for correct guess
+          } else {
+              gameData.scores[trueAuthor] += (1 * multiplier); // +1 to author for fooling them
+          }
+      });
+
+      io.emit('show_reveal', {
+          author: trueAuthor,
+          scores: gameData.scores
+      });
+      
+      // Clear current story so it doesn't get scored twice
+      gameData.currentStory = null; 
+  });
+
   socket.on('host_reset_game', () => {
-      gameData = { players: [], stories: [], currentStory: null, votes: [] };
+      gameData = { players: [], stories: [], currentStory: null, votes: [], scores: {}, roundCount: 0 };
       io.emit('game_reset');
-      io.emit('update_host_stats', { totalStories: 0 });
+      io.emit('update_host_stats', { totalStories: 0, roundCount: 0 });
   });
 
 });
