@@ -3,17 +3,18 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
-// The Server's Memory (Now with Scores and Round Tracking)
+// The Server's Memory
 let gameData = {
     players: [],
     stories: [],
     currentStory: null,
     votes: [],
     scores: {},
-    roundCount: 0
+    roundCount: 0,
+    hostName: null // Tracks who is in charge
 };
 
-// 1. Deliver the Player Screen
+// 1. Deliver the Player Screen (Now includes hidden Host controls)
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -22,11 +23,16 @@ app.get('/', (req, res) => {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Story Warz - Player</title>
         <style>
-            body { background: #121212; color: white; font-family: sans-serif; text-align: center; padding: 20px; }
+            body { background: #121212; color: white; font-family: sans-serif; text-align: center; padding: 20px; padding-bottom: 100px; }
             input, button { width: 80%; padding: 15px; margin: 10px; font-size: 16px; border-radius: 8px; border: none; }
             button { background: #ff4444; color: white; font-weight: bold; cursor: pointer; }
             .vote-btn { background: #4444ff; margin: 5px; width: 90%; }
-            #submit-section, #waiting-section, #voting-section { display: none; }
+            #submit-section, #waiting-section, #voting-section, #host-controls { display: none; }
+            
+            /* Host Panel Styling */
+            #host-controls { margin-top: 40px; padding: 15px; border: 2px solid #ffaa00; border-radius: 10px; background: #222; }
+            .btn-pull { background: #ffaa00; color: black; }
+            .btn-reveal { background: #44ff44; color: black; }
         </style>
     </head>
     <body>
@@ -56,10 +62,19 @@ app.get('/', (req, res) => {
             <div id="vote-buttons"></div>
         </div>
 
+        <div id="host-controls">
+            <h3 style="color: #ffaa00; margin-top: 0;">👑 Host Controls</h3>
+            <div style="margin-bottom: 10px;">Bank: <span id="storyCount">0</span> | Round: <span id="roundCount">0</span>/8</div>
+            <button class="btn-pull" onclick="triggerNextStory()">1. PULL STORY</button>
+            <button class="btn-reveal" onclick="revealStory()">2. REVEAL</button>
+            <button onclick="resetGame()" style="margin-top: 20px;">🚨 RESET GAME</button>
+        </div>
+
         <script src="/socket.io/socket.io.js"></script>
         <script>
             const socket = io();
             let myName = "";
+            let isHost = false;
 
             function joinGame() {
                 myName = document.getElementById('playerName').value;
@@ -69,6 +84,14 @@ app.get('/', (req, res) => {
                     document.getElementById('submit-section').style.display = 'block';
                 }
             }
+
+            // Server confirms join and tells us if we are the host
+            socket.on('join_success', function(data) {
+                if (data.isHost) {
+                    isHost = true;
+                    document.getElementById('host-controls').style.display = 'block';
+                }
+            });
 
             function submitStories() {
                 const stories = [
@@ -87,7 +110,10 @@ app.get('/', (req, res) => {
                 
                 let btnsHTML = "";
                 data.players.forEach(p => {
-                    btnsHTML += "<button class='vote-btn' onclick='castVote(\\"" + p + "\\")'>" + p + "</button><br>";
+                    // THE FIX: Only create a button if it is NOT the player's own name
+                    if(p !== myName) {
+                        btnsHTML += "<button class='vote-btn' onclick='castVote(\\"" + p + "\\")'>" + p + "</button><br>";
+                    }
                 });
                 document.getElementById('vote-buttons').innerHTML = btnsHTML;
             });
@@ -98,6 +124,18 @@ app.get('/', (req, res) => {
                 document.getElementById('waiting-section').style.display = 'block';
                 document.getElementById('wait-text').innerText = "Vote locked in!";
             }
+
+            // Host Actions
+            function triggerNextStory() { socket.emit('host_next_story'); }
+            function revealStory() { socket.emit('host_reveal_author'); }
+            function resetGame() { if(confirm("Are you sure?")) socket.emit('host_reset_game'); }
+
+            socket.on('update_host_stats', function(data) {
+                if(isHost) {
+                    document.getElementById('storyCount').innerText = data.totalStories;
+                    document.getElementById('roundCount').innerText = data.roundCount;
+                }
+            });
 
             socket.on('game_reset', () => { window.location.reload(); });
         </script>
@@ -182,12 +220,10 @@ app.get('/tv', (req, res) => {
                 const board = document.getElementById('story-board');
                 board.innerHTML += "<div class='reveal-author'>AUTHOR: " + data.author + "!</div>";
                 
-                // Show Leaderboard
                 const lb = document.getElementById('leaderboard');
                 lb.style.display = 'inline-block';
                 let lbHTML = "<h3>LEADERBOARD</h3>";
                 
-                // Sort scores highest to lowest
                 let sortedPlayers = Object.keys(data.scores).sort((a, b) => data.scores[b] - data.scores[a]);
                 sortedPlayers.forEach(p => {
                     lbHTML += "<div><strong>" + p + "</strong>: " + data.scores[p] + " pts</div><hr>";
@@ -202,65 +238,24 @@ app.get('/tv', (req, res) => {
   `);
 });
 
-// 3. Deliver the Host Remote
-app.get('/host', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Host Remote</title>
-        <style>
-            body { background: #000; color: #ffaa00; font-family: sans-serif; text-align: center; padding: 20px; }
-            button { width: 90%; padding: 20px; margin: 15px 0; font-size: 18px; font-weight: bold; border-radius: 10px; cursor: pointer; border: none; }
-            .btn-pull { background: #ffaa00; color: black; }
-            .btn-reveal { background: #44ff44; color: black; }
-            .btn-reset { background: #ff4444; color: white; margin-top: 50px; }
-            #stats { margin-bottom: 20px; font-size: 20px; }
-        </style>
-    </head>
-    <body>
-        <h1>HOST REMOTE</h1>
-        <div id="stats">Stories in Bank: <span id="storyCount">0</span> | Round: <span id="roundCount">0</span>/8</div>
-        
-        <button class="btn-pull" onclick="triggerNextStory()">1. PULL RANDOM STORY</button>
-        <button class="btn-reveal" onclick="revealStory()">2. REVEAL AUTHOR & SCORES</button>
-        
-        <button class="btn-reset" onclick="resetGame()">🚨 RESET GAME (CLEAR ALL)</button>
-
-        <script src="/socket.io/socket.io.js"></script>
-        <script>
-            const socket = io();
-            
-            socket.on('update_host_stats', function(data) {
-                document.getElementById('storyCount').innerText = data.totalStories;
-                document.getElementById('roundCount').innerText = data.roundCount;
-            });
-
-            function triggerNextStory() { socket.emit('host_next_story'); }
-            function revealStory() { socket.emit('host_reveal_author'); }
-
-            function resetGame() {
-                if(confirm("Are you sure? This will delete all players and stories!")) {
-                    socket.emit('host_reset_game');
-                }
-            }
-        </script>
-    </body>
-    </html>
-  `);
-});
-
-// 4. The Real-Time Brain
+// 3. The Real-Time Brain
 io.on('connection', (socket) => {
   
   gameData.players.forEach(p => socket.emit('update_lobby', { name: p }));
 
   socket.on('player_join', (data) => {
+    // If no one is in the game yet, this person becomes the host
+    if (gameData.players.length === 0) {
+        gameData.hostName = data.name;
+    }
+
     if (!gameData.players.includes(data.name)) {
         gameData.players.push(data.name);
-        gameData.scores[data.name] = 0; // Initialize score to zero
+        gameData.scores[data.name] = 0; 
     }
+    
+    // Tell this specific player if they get the Host Crown
+    socket.emit('join_success', { isHost: (gameData.hostName === data.name) });
     io.emit('update_lobby', { name: data.name });
   });
 
@@ -275,7 +270,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('host_next_story', () => {
-    if (gameData.roundCount >= 8) return; // Cap at 8 rounds
+    if (gameData.roundCount >= 8) return; 
 
     let unreadStories = gameData.stories.filter(s => s.read === false);
     if (unreadStories.length > 0) {
@@ -313,12 +308,11 @@ io.on('connection', (socket) => {
       let trueAuthor = gameData.currentStory.author;
       let multiplier = (gameData.roundCount >= 5) ? 2 : 1; 
 
-      // Calculate the Math
       gameData.votes.forEach(vote => {
           if (vote.guess === trueAuthor) {
-              gameData.scores[vote.voter] += (2 * multiplier); // +2 for correct guess
+              gameData.scores[vote.voter] += (2 * multiplier); 
           } else {
-              gameData.scores[trueAuthor] += (1 * multiplier); // +1 to author for fooling them
+              gameData.scores[trueAuthor] += (1 * multiplier); 
           }
       });
 
@@ -327,12 +321,11 @@ io.on('connection', (socket) => {
           scores: gameData.scores
       });
       
-      // Clear current story so it doesn't get scored twice
       gameData.currentStory = null; 
   });
 
   socket.on('host_reset_game', () => {
-      gameData = { players: [], stories: [], currentStory: null, votes: [], scores: {}, roundCount: 0 };
+      gameData = { players: [], stories: [], currentStory: null, votes: [], scores: {}, roundCount: 0, hostName: null };
       io.emit('game_reset');
       io.emit('update_host_stats', { totalStories: 0, roundCount: 0 });
   });
