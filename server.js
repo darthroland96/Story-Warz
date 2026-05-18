@@ -11,10 +11,10 @@ let gameData = {
     votes: [],
     scores: {},
     roundCount: 0,
-    hostName: null // Tracks who is in charge
+    hostName: null
 };
 
-// 1. Deliver the Player Screen (Now includes hidden Host controls)
+// 1. Deliver the Player Screen 
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -29,7 +29,6 @@ app.get('/', (req, res) => {
             .vote-btn { background: #4444ff; margin: 5px; width: 90%; }
             #submit-section, #waiting-section, #voting-section, #host-controls { display: none; }
             
-            /* Host Panel Styling */
             #host-controls { margin-top: 40px; padding: 15px; border: 2px solid #ffaa00; border-radius: 10px; background: #222; }
             .btn-pull { background: #ffaa00; color: black; }
             .btn-reveal { background: #44ff44; color: black; }
@@ -67,7 +66,7 @@ app.get('/', (req, res) => {
             <div style="margin-bottom: 10px;">Bank: <span id="storyCount">0</span> | Round: <span id="roundCount">0</span>/8</div>
             <button class="btn-pull" onclick="triggerNextStory()">1. PULL STORY</button>
             <button class="btn-reveal" onclick="revealStory()">2. REVEAL</button>
-            <button onclick="resetGame()" style="margin-top: 20px;">🚨 RESET GAME</button>
+            <button onclick="resetGame()" style="margin-top: 20px; background: #ff4444; color: white;">🚨 RESET GAME</button>
         </div>
 
         <script src="/socket.io/socket.io.js"></script>
@@ -85,7 +84,6 @@ app.get('/', (req, res) => {
                 }
             }
 
-            // Server confirms join and tells us if we are the host
             socket.on('join_success', function(data) {
                 if (data.isHost) {
                     isHost = true;
@@ -110,7 +108,6 @@ app.get('/', (req, res) => {
                 
                 let btnsHTML = "";
                 data.players.forEach(p => {
-                    // THE FIX: Only create a button if it is NOT the player's own name
                     if(p !== myName) {
                         btnsHTML += "<button class='vote-btn' onclick='castVote(\\"" + p + "\\")'>" + p + "</button><br>";
                     }
@@ -125,7 +122,6 @@ app.get('/', (req, res) => {
                 document.getElementById('wait-text').innerText = "Vote locked in!";
             }
 
-            // Host Actions
             function triggerNextStory() { socket.emit('host_next_story'); }
             function revealStory() { socket.emit('host_reveal_author'); }
             function resetGame() { if(confirm("Are you sure?")) socket.emit('host_reset_game'); }
@@ -244,17 +240,13 @@ io.on('connection', (socket) => {
   gameData.players.forEach(p => socket.emit('update_lobby', { name: p }));
 
   socket.on('player_join', (data) => {
-    // If no one is in the game yet, this person becomes the host
-    if (gameData.players.length === 0) {
-        gameData.hostName = data.name;
-    }
+    if (gameData.players.length === 0) { gameData.hostName = data.name; }
 
     if (!gameData.players.includes(data.name)) {
         gameData.players.push(data.name);
         gameData.scores[data.name] = 0; 
     }
     
-    // Tell this specific player if they get the Host Crown
     socket.emit('join_success', { isHost: (gameData.hostName === data.name) });
     io.emit('update_lobby', { name: data.name });
   });
@@ -302,6 +294,7 @@ io.on('connection', (socket) => {
       }
   });
 
+  // ---> THE MATH FIX IS HERE <---
   socket.on('host_reveal_author', () => {
       if (!gameData.currentStory) return;
 
@@ -309,9 +302,17 @@ io.on('connection', (socket) => {
       let multiplier = (gameData.roundCount >= 5) ? 2 : 1; 
 
       gameData.votes.forEach(vote => {
+          // If the vote belongs to the author, skip it completely. They don't get points for fooling themselves!
+          if (vote.voter === trueAuthor) {
+              return; 
+          }
+
+          // If a normal player guesses correctly
           if (vote.guess === trueAuthor) {
               gameData.scores[vote.voter] += (2 * multiplier); 
-          } else {
+          } 
+          // If a normal player guesses incorrectly
+          else {
               gameData.scores[trueAuthor] += (1 * multiplier); 
           }
       });
