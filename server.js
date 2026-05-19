@@ -10,8 +10,11 @@ let gameData = {
     currentStory: null,
     votes: [],
     scores: {},
+    stats: {}, // For the Hall of Shame
     roundCount: 0,
-    hostName: null
+    hostName: null,
+    theme: "",
+    phase: "lobby" // lobby, writing, voting, reveal, finale
 };
 
 // 1. Deliver the Player Screen 
@@ -27,11 +30,13 @@ app.get('/', (req, res) => {
             input, button { width: 80%; padding: 15px; margin: 10px; font-size: 16px; border-radius: 8px; border: none; }
             button { background: #ff4444; color: white; font-weight: bold; cursor: pointer; }
             .vote-btn { background: #4444ff; margin: 5px; width: 90%; }
-            #submit-section, #waiting-section, #voting-section, #host-controls { display: none; }
+            #submit-section, #waiting-section, #voting-section, #host-controls, #pre-game-host { display: none; }
             
-            #host-controls { margin-top: 40px; padding: 15px; border: 2px solid #ffaa00; border-radius: 10px; background: #222; }
+            /* Host Panels */
+            .host-panel { margin-top: 40px; padding: 15px; border: 2px solid #ffaa00; border-radius: 10px; background: #222; }
             .btn-pull { background: #ffaa00; color: black; }
-            .btn-reveal { background: #44ff44; color: black; }
+            .btn-reveal { background: #555; color: white; transition: 0.3s; } /* Starts grayed out */
+            .btn-reveal.unlocked { background: #44ff44; color: black; }
         </style>
     </head>
     <body>
@@ -42,7 +47,12 @@ app.get('/', (req, res) => {
             <button onclick="joinGame()">JOIN LOBBY</button>
         </div>
 
+        <div id="waiting-section">
+            <h3 id="wait-text">Waiting for Host to start the game...</h3>
+        </div>
+
         <div id="submit-section">
+            <h2 id="display-theme" style="color: #ffaa00;"></h2>
             <h3>Submit 3 to 5 Stories</h3>
             <input id="s1" type="text" placeholder="Story 1 (Required)">
             <input id="s2" type="text" placeholder="Story 2 (Required)">
@@ -51,21 +61,29 @@ app.get('/', (req, res) => {
             <input id="s5" type="text" placeholder="Story 5 (Optional)">
             <button onclick="submitStories()">LOCK IN STORIES</button>
         </div>
-        
-        <div id="waiting-section">
-            <h3 id="wait-text">Stories locked in! Look at the TV.</h3>
-        </div>
 
         <div id="voting-section">
             <h3>Who wrote this?</h3>
             <div id="vote-buttons"></div>
         </div>
 
-        <div id="host-controls">
+        <div id="pre-game-host" class="host-panel">
+            <h3 style="color: #ffaa00; margin-top: 0;">👑 Setup Game</h3>
+            <input id="themeInput" type="text" placeholder="Enter a Theme/Prompt">
+            <button style="background: #444;" onclick="generateRandomTheme()">🎲 Random Theme</button>
+            <button style="background: #44ff44; color: black;" onclick="startGame()">START WRITING PHASE</button>
+        </div>
+
+        <div id="host-controls" class="host-panel">
             <h3 style="color: #ffaa00; margin-top: 0;">👑 Host Controls</h3>
             <div style="margin-bottom: 10px;">Bank: <span id="storyCount">0</span> | Round: <span id="roundCount">0</span>/8</div>
-            <button class="btn-pull" onclick="triggerNextStory()">1. PULL STORY</button>
-            <button class="btn-reveal" onclick="revealStory()">2. REVEAL</button>
+            <button id="btn-pull" class="btn-pull" onclick="triggerNextStory()">1. PULL STORY</button>
+            
+            <button id="btn-reveal" class="btn-reveal" disabled onclick="revealStory()">
+                2. REVEAL (<span id="voteCount">0</span>/<span id="totalPlayers">0</span>)
+            </button>
+            
+            <button id="btn-finale" style="display:none; background: #9900ff;" onclick="showFinale()">🏆 SHOW FINAL RESULTS</button>
             <button onclick="resetGame()" style="margin-top: 20px; background: #ff4444; color: white;">🚨 RESET GAME</button>
         </div>
 
@@ -75,20 +93,73 @@ app.get('/', (req, res) => {
             let myName = "";
             let isHost = false;
 
+            // Auto-Rejoin Logic
+            window.onload = () => {
+                const savedName = localStorage.getItem('storyWarzName');
+                if(savedName) {
+                    document.getElementById('playerName').value = savedName;
+                    joinGame(); // Silently log them back in
+                }
+            };
+
+            const randomThemes = [
+                "Your worst childhood injury", "A time you completely embarrassed yourself",
+                "A vacation disaster", "The most ridiculous lie you've ever told",
+                "A time you got caught doing something bad", "Your worst cooking fail",
+                "An unexplainable/creepy encounter", "The worst date you've ever been on"
+            ];
+
+            function generateRandomTheme() {
+                const random = randomThemes[Math.floor(Math.random() * randomThemes.length)];
+                document.getElementById('themeInput').value = random;
+            }
+
             function joinGame() {
                 myName = document.getElementById('playerName').value;
                 if(myName) {
+                    localStorage.setItem('storyWarzName', myName); // Save for auto-rejoin
                     socket.emit('player_join', { name: myName });
                     document.getElementById('join-section').style.display = 'none';
-                    document.getElementById('submit-section').style.display = 'block';
+                    document.getElementById('waiting-section').style.display = 'block';
                 }
             }
 
-            socket.on('join_success', function(data) {
+            // Sync screen if player refreshed or re-joined mid-game
+            socket.on('sync_state', function(data) {
                 if (data.isHost) {
                     isHost = true;
+                    if (data.phase === "lobby") document.getElementById('pre-game-host').style.display = 'block';
+                    else document.getElementById('host-controls').style.display = 'block';
+                }
+
+                if (data.phase === "writing") {
+                    document.getElementById('waiting-section').style.display = 'none';
+                    document.getElementById('submit-section').style.display = 'block';
+                    document.getElementById('display-theme').innerText = "Theme: " + data.theme;
+                } else if (data.phase === "voting" && !data.hasVoted) {
+                    document.getElementById('waiting-section').style.display = 'none';
+                    document.getElementById('voting-section').style.display = 'block';
+                    buildVoteButtons(data.players);
+                } else if (data.phase !== "lobby") {
+                    document.getElementById('waiting-section').style.display = 'block';
+                    document.getElementById('wait-text').innerText = "Look at the TV!";
+                }
+            });
+
+            // Host Actions
+            function startGame() {
+                const theme = document.getElementById('themeInput').value || "Free for all (Any Story)";
+                socket.emit('host_start_game', { theme: theme });
+            }
+
+            socket.on('game_started', function(data) {
+                if(isHost) {
+                    document.getElementById('pre-game-host').style.display = 'none';
                     document.getElementById('host-controls').style.display = 'block';
                 }
+                document.getElementById('waiting-section').style.display = 'none';
+                document.getElementById('submit-section').style.display = 'block';
+                document.getElementById('display-theme').innerText = "Theme: " + data.theme;
             });
 
             function submitStories() {
@@ -100,20 +171,22 @@ app.get('/', (req, res) => {
                 socket.emit('submit_stories', { name: myName, stories: stories });
                 document.getElementById('submit-section').style.display = 'none';
                 document.getElementById('waiting-section').style.display = 'block';
+                document.getElementById('wait-text').innerText = "Stories locked! Look at the TV.";
             }
 
             socket.on('display_new_story', function(data) {
                 document.getElementById('waiting-section').style.display = 'none';
                 document.getElementById('voting-section').style.display = 'block';
-                
+                buildVoteButtons(data.players);
+            });
+
+            function buildVoteButtons(playerList) {
                 let btnsHTML = "";
-                data.players.forEach(p => {
-                    if(p !== myName) {
-                        btnsHTML += "<button class='vote-btn' onclick='castVote(\\"" + p + "\\")'>" + p + "</button><br>";
-                    }
+                playerList.forEach(p => {
+                    if(p !== myName) { btnsHTML += "<button class='vote-btn' onclick='castVote(\\"" + p + "\\")'>" + p + "</button><br>"; }
                 });
                 document.getElementById('vote-buttons').innerHTML = btnsHTML;
-            });
+            }
 
             function castVote(guess) {
                 socket.emit('cast_vote', { voter: myName, guess: guess });
@@ -122,18 +195,45 @@ app.get('/', (req, res) => {
                 document.getElementById('wait-text').innerText = "Vote locked in!";
             }
 
+            // The Lockdown Tracker for the Host
+            socket.on('update_vote_count', function(data) {
+                if(isHost) {
+                    document.getElementById('voteCount').innerText = data.current;
+                    document.getElementById('totalPlayers').innerText = data.total;
+                    
+                    const revealBtn = document.getElementById('btn-reveal');
+                    if(data.current >= data.total && data.total > 0) {
+                        revealBtn.disabled = false;
+                        revealBtn.classList.add('unlocked');
+                    } else {
+                        revealBtn.disabled = true;
+                        revealBtn.classList.remove('unlocked');
+                    }
+                }
+            });
+
             function triggerNextStory() { socket.emit('host_next_story'); }
             function revealStory() { socket.emit('host_reveal_author'); }
+            function showFinale() { socket.emit('host_finale'); }
             function resetGame() { if(confirm("Are you sure?")) socket.emit('host_reset_game'); }
 
             socket.on('update_host_stats', function(data) {
                 if(isHost) {
                     document.getElementById('storyCount').innerText = data.totalStories;
                     document.getElementById('roundCount').innerText = data.roundCount;
+                    
+                    if(data.roundCount >= 8) {
+                        document.getElementById('btn-pull').style.display = 'none';
+                        document.getElementById('btn-reveal').style.display = 'none';
+                        document.getElementById('btn-finale').style.display = 'block';
+                    }
                 }
             });
 
-            socket.on('game_reset', () => { window.location.reload(); });
+            socket.on('game_reset', () => { 
+                localStorage.removeItem('storyWarzName'); // Wipe memory
+                window.location.reload(); 
+            });
         </script>
     </body>
     </html>
@@ -153,12 +253,17 @@ app.get('/tv', (req, res) => {
             #round-indicator { color: #ffaa00; font-size: 24px; font-weight: bold; margin-bottom: 20px; }
             #lobby { font-size: 24px; background: #2a2a2a; padding: 20px; border-radius: 10px; display: inline-block; min-width: 300px; }
             .player-row { margin: 10px 0; }
-            #story-board { display: none; font-size: 32px; background: #333; padding: 40px; border-radius: 15px; line-height: 1.5; }
+            #story-board, #finale-board { display: none; font-size: 32px; background: #333; padding: 40px; border-radius: 15px; line-height: 1.5; }
             #live-feed { margin-top: 20px; font-size: 24px; color: #ffaa00; text-align: left; display: inline-block; width: 45%; vertical-align: top; }
             #leaderboard { margin-top: 20px; font-size: 24px; text-align: left; display: none; width: 45%; vertical-align: top; background: #111; padding: 20px; border-radius: 10px; border: 2px solid #ff4444;}
             .vote-entry { margin: 10px 0; background: #222; padding: 10px; border-radius: 8px; border-left: 5px solid #ffaa00; }
             .reveal-author { font-size: 40px; color: #44ff44; font-weight: bold; margin-top: 30px; text-transform: uppercase; animation: flash 1s ease-in-out; }
             @keyframes flash { 0% { opacity: 0; } 100% { opacity: 1; } }
+            
+            /* Finale Styles */
+            .award { margin: 20px 0; padding: 20px; background: #222; border-radius: 10px; border: 2px solid #ffaa00; }
+            .award h2 { margin: 0; color: #ffaa00; }
+            .award p { font-size: 40px; margin: 10px 0; font-weight: bold; }
         </style>
     </head>
     <body>
@@ -166,11 +271,13 @@ app.get('/tv', (req, res) => {
         <div id="round-indicator"></div>
         
         <div id="lobby-container">
-            <h2>Players In Lobby:</h2>
+            <h2 id="lobby-title">Players In Lobby:</h2>
             <div id="lobby">Waiting for players...</div>
         </div>
 
         <div id="story-board"></div>
+        
+        <div id="finale-board"></div>
         
         <div id="bottom-container">
             <div id="live-feed"></div>
@@ -185,7 +292,16 @@ app.get('/tv', (req, res) => {
                 const lobbyDiv = document.getElementById('lobby');
                 if(lobbyDiv.innerHTML.includes("Waiting for players...")) { lobbyDiv.innerHTML = ""; }
                 if(!document.getElementById('player-' + data.name)) {
-                    lobbyDiv.innerHTML += "<div id='player-" + data.name + "' class='player-row'>" + data.name + " ⏳ Writing...</div>";
+                    lobbyDiv.innerHTML += "<div id='player-" + data.name + "' class='player-row'>" + data.name + " ⏳ Waiting...</div>";
+                }
+            });
+
+            socket.on('game_started', function(data) {
+                document.getElementById('lobby-title').innerText = "Tonight's Theme: " + data.theme;
+                // Switch icons to writing
+                const rows = document.getElementsByClassName('player-row');
+                for(let i=0; i<rows.length; i++) {
+                    rows[i].innerHTML = rows[i].id.replace('player-', '') + " ✍️ Writing...";
                 }
             });
 
@@ -227,6 +343,33 @@ app.get('/tv', (req, res) => {
                 lb.innerHTML = lbHTML;
             });
 
+            socket.on('show_finale', function(data) {
+                document.getElementById('story-board').style.display = 'none';
+                document.getElementById('live-feed').style.display = 'none';
+                document.getElementById('leaderboard').style.display = 'none';
+                document.getElementById('round-indicator').innerText = "GAME OVER";
+                
+                const finale = document.getElementById('finale-board');
+                finale.style.display = 'block';
+                
+                finale.innerHTML = \`
+                    <div class="award" style="border-color: #44ff44;">
+                        <h2 style="color: #44ff44;">👑 GRAND CHAMPION</h2>
+                        <p>\${data.winner.name} (\${data.winner.score} pts)</p>
+                    </div>
+                    <div class="award">
+                        <h2>🕵️ THE MASTERMIND</h2>
+                        <div style="font-size: 20px; color: #ccc;">Fooled the lobby \${data.mastermind.count} times</div>
+                        <p>\${data.mastermind.name}</p>
+                    </div>
+                    <div class="award">
+                        <h2>🤡 THE EASY TARGET</h2>
+                        <div style="font-size: 20px; color: #ccc;">Guessed wrong \${data.gullible.count} times</div>
+                        <p>\${data.gullible.name}</p>
+                    </div>
+                \`;
+            });
+
             socket.on('game_reset', () => { window.location.reload(); });
         </script>
     </body>
@@ -237,18 +380,32 @@ app.get('/tv', (req, res) => {
 // 3. The Real-Time Brain
 io.on('connection', (socket) => {
   
-  gameData.players.forEach(p => socket.emit('update_lobby', { name: p }));
-
+  // Player reconnects
   socket.on('player_join', (data) => {
     if (gameData.players.length === 0) { gameData.hostName = data.name; }
 
     if (!gameData.players.includes(data.name)) {
         gameData.players.push(data.name);
         gameData.scores[data.name] = 0; 
+        gameData.stats[data.name] = { fooled: 0, gullible: 0 };
     }
     
-    socket.emit('join_success', { isHost: (gameData.hostName === data.name) });
+    // Sync current state for seamless rejoin
+    socket.emit('sync_state', { 
+        isHost: (gameData.hostName === data.name),
+        phase: gameData.phase,
+        theme: gameData.theme,
+        players: gameData.players,
+        hasVoted: gameData.votes.some(v => v.voter === data.name)
+    });
+    
     io.emit('update_lobby', { name: data.name });
+  });
+
+  socket.on('host_start_game', (data) => {
+      gameData.theme = data.theme;
+      gameData.phase = "writing";
+      io.emit('game_started', { theme: gameData.theme });
   });
 
   socket.on('submit_stories', (data) => {
@@ -273,6 +430,7 @@ io.on('connection', (socket) => {
         gameData.currentStory = selectedStory;
         gameData.votes = []; 
         gameData.roundCount++;
+        gameData.phase = "voting";
         
         let doublePointsActive = gameData.roundCount >= 5;
 
@@ -283,6 +441,8 @@ io.on('connection', (socket) => {
             isDoublePoints: doublePointsActive
         });
         
+        // Reset Host Vote Lockdown
+        io.emit('update_vote_count', { current: 0, total: gameData.players.length });
         io.emit('update_host_stats', { totalStories: gameData.stories.length, roundCount: gameData.roundCount });
     }
   });
@@ -291,44 +451,56 @@ io.on('connection', (socket) => {
       if(!gameData.votes.find(v => v.voter === data.voter)) {
           gameData.votes.push(data);
           io.emit('show_vote_live', data);
+          
+          // Lockdown check! Tell host exactly how many votes are in.
+          io.emit('update_vote_count', { current: gameData.votes.length, total: gameData.players.length });
       }
   });
 
-  // ---> THE MATH FIX IS HERE <---
   socket.on('host_reveal_author', () => {
       if (!gameData.currentStory) return;
+      gameData.phase = "reveal";
 
       let trueAuthor = gameData.currentStory.author;
       let multiplier = (gameData.roundCount >= 5) ? 2 : 1; 
 
       gameData.votes.forEach(vote => {
-          // If the vote belongs to the author, skip it completely. They don't get points for fooling themselves!
-          if (vote.voter === trueAuthor) {
-              return; 
-          }
+          if (vote.voter === trueAuthor) return; 
 
-          // If a normal player guesses correctly
           if (vote.guess === trueAuthor) {
               gameData.scores[vote.voter] += (2 * multiplier); 
-          } 
-          // If a normal player guesses incorrectly
-          else {
+          } else {
               gameData.scores[trueAuthor] += (1 * multiplier); 
+              gameData.stats[trueAuthor].fooled++;
+              gameData.stats[vote.voter].gullible++;
           }
       });
 
-      io.emit('show_reveal', {
-          author: trueAuthor,
-          scores: gameData.scores
-      });
-      
+      io.emit('show_reveal', { author: trueAuthor, scores: gameData.scores });
       gameData.currentStory = null; 
   });
 
+  socket.on('host_finale', () => {
+      gameData.phase = "finale";
+      
+      // Calculate Superlatives safely
+      let players = Object.keys(gameData.stats);
+      if(players.length === 0) return;
+
+      let winner = players.reduce((a, b) => gameData.scores[a] > gameData.scores[b] ? a : b);
+      let mastermind = players.reduce((a, b) => gameData.stats[a].fooled > gameData.stats[b].fooled ? a : b);
+      let gullible = players.reduce((a, b) => gameData.stats[a].gullible > gameData.stats[b].gullible ? a : b);
+
+      io.emit('show_finale', {
+          winner: { name: winner, score: gameData.scores[winner] },
+          mastermind: { name: mastermind, count: gameData.stats[mastermind].fooled },
+          gullible: { name: gullible, count: gameData.stats[gullible].gullible }
+      });
+  });
+
   socket.on('host_reset_game', () => {
-      gameData = { players: [], stories: [], currentStory: null, votes: [], scores: {}, roundCount: 0, hostName: null };
+      gameData = { players: [], stories: [], currentStory: null, votes: [], scores: {}, stats: {}, roundCount: 0, hostName: null, theme: "", phase: "lobby" };
       io.emit('game_reset');
-      io.emit('update_host_stats', { totalStories: 0, roundCount: 0 });
   });
 
 });
