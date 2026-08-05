@@ -10,11 +10,15 @@ let gameData = {
     currentStory: null,
     votes: [],
     scores: {},
-    stats: {}, // For the Hall of Shame
+    stats: {}, 
     roundCount: 0,
     hostName: null,
     theme: "",
-    phase: "lobby" // lobby, writing, voting, reveal, finale
+    phase: "lobby", 
+    timerInterval: null,
+    countdown: 0,
+    revealQueue: [],
+    tieBreaker: { active: false, players: [], wagers: {}, story: null }
 };
 
 // 1. Deliver the Player Screen 
@@ -30,13 +34,13 @@ app.get('/', (req, res) => {
             input, button { width: 80%; padding: 15px; margin: 10px; font-size: 16px; border-radius: 8px; border: none; }
             button { background: #ff4444; color: white; font-weight: bold; cursor: pointer; }
             .vote-btn { background: #4444ff; margin: 5px; width: 90%; }
-            #submit-section, #waiting-section, #voting-section, #host-controls, #pre-game-host { display: none; }
+            #submit-section, #waiting-section, #voting-section, #host-controls, #pre-game-host, #wager-section { display: none; }
             
-            /* Host Panels */
             .host-panel { margin-top: 40px; padding: 15px; border: 2px solid #ffaa00; border-radius: 10px; background: #222; }
             .btn-pull { background: #ffaa00; color: black; }
-            .btn-reveal { background: #555; color: white; transition: 0.3s; } /* Starts grayed out */
+            .btn-reveal { background: #555; color: white; transition: 0.3s; } 
             .btn-reveal.unlocked { background: #44ff44; color: black; }
+            #timer-display { font-size: 24px; color: #ffaa00; font-weight: bold; margin: 10px 0; }
         </style>
     </head>
     <body>
@@ -49,6 +53,7 @@ app.get('/', (req, res) => {
 
         <div id="waiting-section">
             <h3 id="wait-text">Waiting for Host to start the game...</h3>
+            <div id="timer-display"></div>
         </div>
 
         <div id="submit-section">
@@ -67,6 +72,14 @@ app.get('/', (req, res) => {
             <div id="vote-buttons"></div>
         </div>
 
+        <div id="wager-section">
+            <h3 style="color: #ffaa00;">SUDDEN DEATH TIE-BREAKER!</h3>
+            <p>You are tied for 1st place! Wager your points before the final story.</p>
+            <p>Your Score: <span id="my-score">0</span></p>
+            <input id="wagerAmount" type="number" placeholder="Enter Wager Amount" min="0">
+            <button onclick="submitWager()">LOCK IN WAGER</button>
+        </div>
+
         <div id="pre-game-host" class="host-panel">
             <h3 style="color: #ffaa00; margin-top: 0;">👑 Setup Game</h3>
             <input id="themeInput" type="text" placeholder="Enter a Theme/Prompt">
@@ -78,12 +91,21 @@ app.get('/', (req, res) => {
             <h3 style="color: #ffaa00; margin-top: 0;">👑 Host Controls</h3>
             <div style="margin-bottom: 10px;">Bank: <span id="storyCount">0</span> | Round: <span id="roundCount">0</span>/8</div>
             <button id="btn-pull" class="btn-pull" onclick="triggerNextStory()">1. PULL STORY</button>
+            <button id="btn-skip-timer" style="display:none; background: #888;" onclick="skipTimer()">⏩ SKIP TIMER</button>
             
             <button id="btn-reveal" class="btn-reveal" disabled onclick="revealStory()">
-                2. REVEAL (<span id="voteCount">0</span>/<span id="totalPlayers">0</span>)
+                2. REVEAL AUTHOR (<span id="voteCount">0</span>/<span id="totalPlayers">0</span>)
             </button>
             
-            <button id="btn-finale" style="display:none; background: #9900ff;" onclick="showFinale()">🏆 SHOW FINAL RESULTS</button>
+            <button id="btn-reveal-next" style="display:none; background: #4444ff; color: white;" onclick="revealNextScore()">3. REVEAL NEXT PLACE</button>
+            <button id="btn-finale" style="display:none; background: #9900ff;" onclick="checkFinale()">🏆 END GAME / CHECK TIE</button>
+
+            <div id="host-tie-controls" style="display:none; border-top: 1px solid #555; margin-top: 15px; padding-top: 15px;">
+                <h4 style="color: #ffaa00; margin: 0 0 10px 0;">SUDDEN DEATH</h4>
+                <button class="btn-pull" onclick="pullTieBreaker()">PULL FINAL STORY</button>
+                <button id="btn-tie-reveal" class="btn-reveal" disabled onclick="revealTieBreaker()">REVEAL WINNER (<span id="tieVoteCount">0</span>/2)</button>
+            </div>
+
             <button onclick="resetGame()" style="margin-top: 20px; background: #ff4444; color: white;">🚨 RESET GAME</button>
         </div>
 
@@ -92,39 +114,36 @@ app.get('/', (req, res) => {
             const socket = io();
             let myName = "";
             let isHost = false;
+            let currentScore = 0;
 
-            // Auto-Rejoin Logic
             window.onload = () => {
                 const savedName = localStorage.getItem('storyWarzName');
                 if(savedName) {
                     document.getElementById('playerName').value = savedName;
-                    joinGame(); // Silently log them back in
+                    joinGame(); 
                 }
             };
 
             const randomThemes = [
                 "Your worst childhood injury", "A time you completely embarrassed yourself",
                 "A vacation disaster", "The most ridiculous lie you've ever told",
-                "A time you got caught doing something bad", "Your worst cooking fail",
-                "An unexplainable/creepy encounter", "The worst date you've ever been on"
+                "A time you got caught doing something bad", "Your worst cooking fail"
             ];
 
             function generateRandomTheme() {
-                const random = randomThemes[Math.floor(Math.random() * randomThemes.length)];
-                document.getElementById('themeInput').value = random;
+                document.getElementById('themeInput').value = randomThemes[Math.floor(Math.random() * randomThemes.length)];
             }
 
             function joinGame() {
                 myName = document.getElementById('playerName').value;
                 if(myName) {
-                    localStorage.setItem('storyWarzName', myName); // Save for auto-rejoin
+                    localStorage.setItem('storyWarzName', myName); 
                     socket.emit('player_join', { name: myName });
                     document.getElementById('join-section').style.display = 'none';
                     document.getElementById('waiting-section').style.display = 'block';
                 }
             }
 
-            // Sync screen if player refreshed or re-joined mid-game
             socket.on('sync_state', function(data) {
                 if (data.isHost) {
                     isHost = true;
@@ -140,16 +159,16 @@ app.get('/', (req, res) => {
                     document.getElementById('waiting-section').style.display = 'none';
                     document.getElementById('voting-section').style.display = 'block';
                     buildVoteButtons(data.players);
-                } else if (data.phase !== "lobby") {
-                    document.getElementById('waiting-section').style.display = 'block';
-                    document.getElementById('wait-text').innerText = "Look at the TV!";
+                } else if (data.phase === "tiebreaker_wager" && data.tiePlayers.includes(myName)) {
+                    document.getElementById('waiting-section').style.display = 'none';
+                    document.getElementById('wager-section').style.display = 'block';
+                    document.getElementById('my-score').innerText = data.score;
+                    currentScore = data.score;
                 }
             });
 
-            // Host Actions
             function startGame() {
-                const theme = document.getElementById('themeInput').value || "Free for all (Any Story)";
-                socket.emit('host_start_game', { theme: theme });
+                socket.emit('host_start_game', { theme: document.getElementById('themeInput').value || "Free for all" });
             }
 
             socket.on('game_started', function(data) {
@@ -174,7 +193,12 @@ app.get('/', (req, res) => {
                 document.getElementById('wait-text').innerText = "Stories locked! Look at the TV.";
             }
 
-            socket.on('display_new_story', function(data) {
+            socket.on('timer_tick', function(data) {
+                document.getElementById('timer-display').innerText = "Voting unlocks in: " + data.seconds + "s";
+            });
+
+            socket.on('voting_unlocked', function(data) {
+                document.getElementById('timer-display').innerText = "";
                 document.getElementById('waiting-section').style.display = 'none';
                 document.getElementById('voting-section').style.display = 'block';
                 buildVoteButtons(data.players);
@@ -195,7 +219,36 @@ app.get('/', (req, res) => {
                 document.getElementById('wait-text').innerText = "Vote locked in!";
             }
 
-            // The Lockdown Tracker for the Host
+            // TIE BREAKER WAGER
+            socket.on('start_tiebreaker_wager', function(data) {
+                if(isHost) {
+                    document.getElementById('btn-pull').style.display = 'none';
+                    document.getElementById('btn-reveal').style.display = 'none';
+                    document.getElementById('btn-finale').style.display = 'none';
+                    document.getElementById('host-tie-controls').style.display = 'block';
+                }
+                
+                if(data.players.includes(myName)) {
+                    document.getElementById('waiting-section').style.display = 'none';
+                    document.getElementById('wager-section').style.display = 'block';
+                    document.getElementById('my-score').innerText = data.scores[myName];
+                    currentScore = data.scores[myName];
+                } else {
+                    document.getElementById('waiting-section').style.display = 'block';
+                    document.getElementById('wait-text').innerText = "SUDDEN DEATH! Look at the TV!";
+                }
+            });
+
+            function submitWager() {
+                let wager = parseInt(document.getElementById('wagerAmount').value);
+                if(isNaN(wager) || wager < 0) wager = 0;
+                if(wager > currentScore) wager = currentScore; // Cap at max score
+                socket.emit('submit_wager', { name: myName, amount: wager });
+                document.getElementById('wager-section').style.display = 'none';
+                document.getElementById('waiting-section').style.display = 'block';
+                document.getElementById('wait-text').innerText = "Wager locked. Get ready.";
+            }
+
             socket.on('update_vote_count', function(data) {
                 if(isHost) {
                     document.getElementById('voteCount').innerText = data.current;
@@ -212,26 +265,57 @@ app.get('/', (req, res) => {
                 }
             });
 
-            function triggerNextStory() { socket.emit('host_next_story'); }
+            socket.on('update_tie_vote_count', function(data) {
+                if(isHost) {
+                    document.getElementById('tieVoteCount').innerText = data.current;
+                    const revealBtn = document.getElementById('btn-tie-reveal');
+                    if(data.current >= data.total) {
+                        revealBtn.disabled = false;
+                        revealBtn.classList.add('unlocked');
+                    }
+                }
+            });
+
+            socket.on('host_prep_leaderboard', function() {
+                if(isHost) {
+                    document.getElementById('btn-reveal').style.display = 'none';
+                    document.getElementById('btn-reveal-next').style.display = 'inline-block';
+                }
+            });
+
+            function triggerNextStory() { 
+                socket.emit('host_next_story'); 
+                if(isHost) document.getElementById('btn-skip-timer').style.display = 'inline-block';
+            }
+            function skipTimer() { 
+                socket.emit('host_skip_timer'); 
+                if(isHost) document.getElementById('btn-skip-timer').style.display = 'none';
+            }
             function revealStory() { socket.emit('host_reveal_author'); }
-            function showFinale() { socket.emit('host_finale'); }
+            function revealNextScore() { socket.emit('host_reveal_next_score'); }
+            function checkFinale() { socket.emit('host_check_finale'); }
+            function pullTieBreaker() { socket.emit('host_pull_tiebreaker'); }
+            function revealTieBreaker() { socket.emit('host_reveal_tiebreaker'); }
             function resetGame() { if(confirm("Are you sure?")) socket.emit('host_reset_game'); }
 
             socket.on('update_host_stats', function(data) {
                 if(isHost) {
                     document.getElementById('storyCount').innerText = data.totalStories;
                     document.getElementById('roundCount').innerText = data.roundCount;
+                    document.getElementById('btn-reveal').style.display = 'inline-block';
+                    document.getElementById('btn-reveal-next').style.display = 'none';
                     
                     if(data.roundCount >= 8) {
                         document.getElementById('btn-pull').style.display = 'none';
                         document.getElementById('btn-reveal').style.display = 'none';
+                        document.getElementById('btn-reveal-next').style.display = 'none';
                         document.getElementById('btn-finale').style.display = 'block';
                     }
                 }
             });
 
             socket.on('game_reset', () => { 
-                localStorage.removeItem('storyWarzName'); // Wipe memory
+                localStorage.removeItem('storyWarzName'); 
                 window.location.reload(); 
             });
         </script>
@@ -250,7 +334,8 @@ app.get('/tv', (req, res) => {
         <style>
             body { background: #1a1a1a; color: white; font-family: sans-serif; text-align: center; padding: 30px; }
             h1 { color: #ff4444; font-size: 50px; margin-bottom: 5px; }
-            #round-indicator { color: #ffaa00; font-size: 24px; font-weight: bold; margin-bottom: 20px; }
+            #round-indicator { color: #ffaa00; font-size: 24px; font-weight: bold; margin-bottom: 10px; }
+            #timer-bar { font-size: 30px; color: #ff4444; font-weight: bold; margin-bottom: 20px; }
             #lobby { font-size: 24px; background: #2a2a2a; padding: 20px; border-radius: 10px; display: inline-block; min-width: 300px; }
             .player-row { margin: 10px 0; }
             #story-board, #finale-board { display: none; font-size: 32px; background: #333; padding: 40px; border-radius: 15px; line-height: 1.5; }
@@ -260,7 +345,6 @@ app.get('/tv', (req, res) => {
             .reveal-author { font-size: 40px; color: #44ff44; font-weight: bold; margin-top: 30px; text-transform: uppercase; animation: flash 1s ease-in-out; }
             @keyframes flash { 0% { opacity: 0; } 100% { opacity: 1; } }
             
-            /* Finale Styles */
             .award { margin: 20px 0; padding: 20px; background: #222; border-radius: 10px; border: 2px solid #ffaa00; }
             .award h2 { margin: 0; color: #ffaa00; }
             .award p { font-size: 40px; margin: 10px 0; font-weight: bold; }
@@ -269,6 +353,7 @@ app.get('/tv', (req, res) => {
     <body>
         <h1>STORY WARZ</h1>
         <div id="round-indicator"></div>
+        <div id="timer-bar"></div>
         
         <div id="lobby-container">
             <h2 id="lobby-title">Players In Lobby:</h2>
@@ -276,12 +361,11 @@ app.get('/tv', (req, res) => {
         </div>
 
         <div id="story-board"></div>
-        
         <div id="finale-board"></div>
         
         <div id="bottom-container">
             <div id="live-feed"></div>
-            <div id="leaderboard"></div>
+            <div id="leaderboard"><h3>LEADERBOARD</h3><div id="lb-content"></div></div>
         </div>
 
         <script src="/socket.io/socket.io.js"></script>
@@ -298,7 +382,6 @@ app.get('/tv', (req, res) => {
 
             socket.on('game_started', function(data) {
                 document.getElementById('lobby-title').innerText = "Tonight's Theme: " + data.theme;
-                // Switch icons to writing
                 const rows = document.getElementsByClassName('player-row');
                 for(let i=0; i<rows.length; i++) {
                     rows[i].innerHTML = rows[i].id.replace('player-', '') + " ✍️ Writing...";
@@ -313,10 +396,15 @@ app.get('/tv', (req, res) => {
             socket.on('display_new_story', function(data) {
                 document.getElementById('lobby-container').style.display = 'none';
                 document.getElementById('leaderboard').style.display = 'none';
+                document.getElementById('lb-content').innerHTML = ""; // Clear old leaderboard
                 
-                let roundText = "ROUND " + data.round + " OF 8";
-                if(data.isDoublePoints) { roundText += " (DOUBLE POINTS!)"; }
-                document.getElementById('round-indicator').innerText = roundText;
+                if(data.isTieBreaker) {
+                    document.getElementById('round-indicator').innerText = "SUDDEN DEATH TIE-BREAKER!";
+                } else {
+                    let roundText = "ROUND " + data.round + " OF 8";
+                    if(data.isDoublePoints) { roundText += " (DOUBLE POINTS!)"; }
+                    document.getElementById('round-indicator').innerText = roundText;
+                }
 
                 document.getElementById('live-feed').innerHTML = "<h3>Live Guesses:</h3>"; 
                 const board = document.getElementById('story-board');
@@ -324,29 +412,44 @@ app.get('/tv', (req, res) => {
                 board.innerHTML = "<strong>Anonymous Story:</strong><br><br>" + data.text;
             });
 
+            socket.on('timer_tick', function(data) {
+                document.getElementById('timer-bar').innerText = "DISCUSS: " + data.seconds + "s";
+            });
+
+            socket.on('voting_unlocked', function() {
+                document.getElementById('timer-bar').innerText = "VOTING UNLOCKED!";
+                setTimeout(() => document.getElementById('timer-bar').innerText = "", 3000);
+            });
+
             socket.on('show_vote_live', function(data) {
                 document.getElementById('live-feed').innerHTML += "<div class='vote-entry'><strong>" + data.voter + "</strong> locked in... Guessing: <strong>" + data.guess + "</strong></div>";
             });
 
-            socket.on('show_reveal', function(data) {
+            socket.on('show_author_only', function(data) {
                 const board = document.getElementById('story-board');
                 board.innerHTML += "<div class='reveal-author'>AUTHOR: " + data.author + "!</div>";
-                
-                const lb = document.getElementById('leaderboard');
-                lb.style.display = 'inline-block';
-                let lbHTML = "<h3>LEADERBOARD</h3>";
-                
-                let sortedPlayers = Object.keys(data.scores).sort((a, b) => data.scores[b] - data.scores[a]);
-                sortedPlayers.forEach(p => {
-                    lbHTML += "<div><strong>" + p + "</strong>: " + data.scores[p] + " pts</div><hr>";
-                });
-                lb.innerHTML = lbHTML;
+                document.getElementById('leaderboard').style.display = 'inline-block';
+            });
+
+            socket.on('show_next_score', function(data) {
+                const lb = document.getElementById('lb-content');
+                lb.innerHTML = "<div class='vote-entry' style='border-left: 5px solid #44ff44; animation: flash 0.5s;'><strong>" + data.name + "</strong>: " + data.score + " pts</div>" + lb.innerHTML;
+            });
+
+            // Tie breaker wager alert
+            socket.on('start_tiebreaker_wager', function(data) {
+                document.getElementById('story-board').style.display = 'none';
+                document.getElementById('live-feed').style.display = 'none';
+                document.getElementById('leaderboard').style.display = 'none';
+                document.getElementById('round-indicator').innerText = "SUDDEN DEATH TIE-BREAKER!";
+                document.getElementById('timer-bar').innerText = data.players.join(" vs ") + " are wagering...";
             });
 
             socket.on('show_finale', function(data) {
                 document.getElementById('story-board').style.display = 'none';
                 document.getElementById('live-feed').style.display = 'none';
                 document.getElementById('leaderboard').style.display = 'none';
+                document.getElementById('timer-bar').innerText = "";
                 document.getElementById('round-indicator').innerText = "GAME OVER";
                 
                 const finale = document.getElementById('finale-board');
@@ -380,7 +483,6 @@ app.get('/tv', (req, res) => {
 // 3. The Real-Time Brain
 io.on('connection', (socket) => {
   
-  // Player reconnects
   socket.on('player_join', (data) => {
     if (gameData.players.length === 0) { gameData.hostName = data.name; }
 
@@ -390,13 +492,14 @@ io.on('connection', (socket) => {
         gameData.stats[data.name] = { fooled: 0, gullible: 0 };
     }
     
-    // Sync current state for seamless rejoin
     socket.emit('sync_state', { 
         isHost: (gameData.hostName === data.name),
         phase: gameData.phase,
         theme: gameData.theme,
         players: gameData.players,
-        hasVoted: gameData.votes.some(v => v.voter === data.name)
+        hasVoted: gameData.votes.some(v => v.voter === data.name),
+        tiePlayers: gameData.tieBreaker.players,
+        score: gameData.scores[data.name]
     });
     
     io.emit('update_lobby', { name: data.name });
@@ -430,7 +533,7 @@ io.on('connection', (socket) => {
         gameData.currentStory = selectedStory;
         gameData.votes = []; 
         gameData.roundCount++;
-        gameData.phase = "voting";
+        gameData.phase = "voting_locked";
         
         let doublePointsActive = gameData.roundCount >= 5;
 
@@ -441,10 +544,33 @@ io.on('connection', (socket) => {
             isDoublePoints: doublePointsActive
         });
         
-        // Reset Host Vote Lockdown
         io.emit('update_vote_count', { current: 0, total: gameData.players.length });
         io.emit('update_host_stats', { totalStories: gameData.stories.length, roundCount: gameData.roundCount });
+
+        // Timer Logic
+        gameData.countdown = 90;
+        clearInterval(gameData.timerInterval);
+        io.emit('timer_tick', { seconds: gameData.countdown });
+        
+        gameData.timerInterval = setInterval(() => {
+            gameData.countdown--;
+            io.emit('timer_tick', { seconds: gameData.countdown });
+            if (gameData.countdown <= 0) {
+                clearInterval(gameData.timerInterval);
+                gameData.phase = "voting";
+                io.emit('voting_unlocked', { players: gameData.players });
+            }
+        }, 1000);
     }
+  });
+
+  socket.on('host_skip_timer', () => {
+      if(gameData.phase === "voting_locked") {
+          clearInterval(gameData.timerInterval);
+          gameData.countdown = 0;
+          gameData.phase = "voting";
+          io.emit('voting_unlocked', { players: gameData.players });
+      }
   });
 
   socket.on('cast_vote', (data) => {
@@ -452,8 +578,11 @@ io.on('connection', (socket) => {
           gameData.votes.push(data);
           io.emit('show_vote_live', data);
           
-          // Lockdown check! Tell host exactly how many votes are in.
-          io.emit('update_vote_count', { current: gameData.votes.length, total: gameData.players.length });
+          if(gameData.phase === "voting") {
+              io.emit('update_vote_count', { current: gameData.votes.length, total: gameData.players.length });
+          } else if (gameData.phase === "tiebreaker_vote") {
+              io.emit('update_tie_vote_count', { current: gameData.votes.length, total: gameData.tieBreaker.players.length });
+          }
       }
   });
 
@@ -466,7 +595,6 @@ io.on('connection', (socket) => {
 
       gameData.votes.forEach(vote => {
           if (vote.voter === trueAuthor) return; 
-
           if (vote.guess === trueAuthor) {
               gameData.scores[vote.voter] += (2 * multiplier); 
           } else {
@@ -476,14 +604,84 @@ io.on('connection', (socket) => {
           }
       });
 
-      io.emit('show_reveal', { author: trueAuthor, scores: gameData.scores });
+      // Prepare Step-by-Step Leaderboard
+      // Sort lowest to highest, so we can shift() the lowest off the front
+      gameData.revealQueue = Object.keys(gameData.scores).sort((a, b) => gameData.scores[a] - gameData.scores[b]);
+
+      io.emit('show_author_only', { author: trueAuthor });
+      socket.emit('host_prep_leaderboard');
       gameData.currentStory = null; 
   });
 
-  socket.on('host_finale', () => {
-      gameData.phase = "finale";
+  socket.on('host_reveal_next_score', () => {
+      if(gameData.revealQueue.length > 0) {
+          let nextPlayer = gameData.revealQueue.shift();
+          io.emit('show_next_score', { name: nextPlayer, score: gameData.scores[nextPlayer] });
+      }
+  });
+
+  socket.on('host_check_finale', () => {
+      let sortedPlayers = Object.keys(gameData.scores).sort((a, b) => gameData.scores[b] - gameData.scores[a]);
+      let highestScore = gameData.scores[sortedPlayers[0]];
       
-      // Calculate Superlatives safely
+      let topPlayers = sortedPlayers.filter(p => gameData.scores[p] === highestScore);
+
+      if(topPlayers.length > 1) {
+          // WE HAVE A TIE
+          gameData.phase = "tiebreaker_wager";
+          gameData.tieBreaker.active = true;
+          gameData.tieBreaker.players = topPlayers;
+          gameData.tieBreaker.wagers = {};
+          
+          io.emit('start_tiebreaker_wager', { players: topPlayers, scores: gameData.scores });
+      } else {
+          // NO TIE, PROCEED TO FINALE
+          triggerFinale();
+      }
+  });
+
+  socket.on('submit_wager', (data) => {
+      if(gameData.tieBreaker.active) {
+          gameData.tieBreaker.wagers[data.name] = data.amount;
+      }
+  });
+
+  socket.on('host_pull_tiebreaker', () => {
+      let unreadStories = gameData.stories.filter(s => s.read === false);
+      if (unreadStories.length > 0) {
+          let randomIndex = Math.floor(Math.random() * unreadStories.length);
+          let tbStory = unreadStories[randomIndex];
+          tbStory.read = true;
+          gameData.tieBreaker.story = tbStory;
+          gameData.phase = "tiebreaker_vote";
+          gameData.votes = [];
+
+          io.emit('display_new_story', { 
+              text: tbStory.text, 
+              players: gameData.players, 
+              isTieBreaker: true 
+          });
+          io.emit('voting_unlocked', { players: gameData.players });
+      }
+  });
+
+  socket.on('host_reveal_tiebreaker', () => {
+      let tbAuthor = gameData.tieBreaker.story.author;
+      
+      gameData.votes.forEach(vote => {
+          let wager = gameData.tieBreaker.wagers[vote.voter] || 0;
+          if (vote.guess === tbAuthor) {
+              gameData.scores[vote.voter] += wager;
+          } else {
+              gameData.scores[vote.voter] -= wager;
+          }
+      });
+      
+      triggerFinale();
+  });
+
+  function triggerFinale() {
+      gameData.phase = "finale";
       let players = Object.keys(gameData.stats);
       if(players.length === 0) return;
 
@@ -496,10 +694,11 @@ io.on('connection', (socket) => {
           mastermind: { name: mastermind, count: gameData.stats[mastermind].fooled },
           gullible: { name: gullible, count: gameData.stats[gullible].gullible }
       });
-  });
+  }
 
   socket.on('host_reset_game', () => {
-      gameData = { players: [], stories: [], currentStory: null, votes: [], scores: {}, stats: {}, roundCount: 0, hostName: null, theme: "", phase: "lobby" };
+      clearInterval(gameData.timerInterval);
+      gameData = { players: [], stories: [], currentStory: null, votes: [], scores: {}, stats: {}, roundCount: 0, hostName: null, theme: "", phase: "lobby", countdown: 0, timerInterval: null, revealQueue: [], tieBreaker: { active: false, players: [], wagers: {}, story: null } };
       io.emit('game_reset');
   });
 
