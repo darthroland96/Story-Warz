@@ -548,7 +548,7 @@ io.on('connection', (socket) => {
         io.emit('update_host_stats', { totalStories: gameData.stories.length, roundCount: gameData.roundCount });
 
         // Timer Logic
-        gameData.countdown = 90;
+        gameData.countdown = 30;
         clearInterval(gameData.timerInterval);
         io.emit('timer_tick', { seconds: gameData.countdown });
         
